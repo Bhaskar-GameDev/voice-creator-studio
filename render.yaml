@@ -4,7 +4,10 @@ services:
     runtime: node
     plan: free
     # Build a standalone Node server (vite.config.ts sets nitro preset "node-server").
-    buildCommand: npm ci && npm run build
+    # Use `npm install` not `npm ci`: npm ci mishandles esbuild's cross-platform
+    # optional deps (EBADPLATFORM on @esbuild/aix-ppc64). npm install selects the
+    # correct platform binary and skips the rest.
+    buildCommand: npm install && npm run build
     # Nitro node-server entry; binds to $PORT automatically.
     startCommand: node .output/server/index.mjs
     autoDeploy: true
