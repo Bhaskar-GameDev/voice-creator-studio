@@ -39,6 +39,18 @@ export const BUILTIN_PRESETS: Preset[] = [
     params: p({ brightness: 60, treble: 35, presence: 35, clarity: 30, compression: 45 }) },
   { id: "bi:energetic",   name: "Energetic Speaker",  builtIn: true,
     params: p({ pitch: 10, presence: 45, clarity: 50, brightness: 40, compression: 70, stereoWidth: 30 }) },
+
+  // Deep + clear: pitch/body down for depth, but presence+clarity kept high so words stay crisp.
+  { id: "bi:deep-clear",    name: "Deep & Clear",        builtIn: true,
+    params: p({ pitch: -22, bass: 30, voiceDepth: 55, warmth: 25, presence: 40, clarity: 45, treble: 10, compression: 50 }) },
+  { id: "bi:deep-anchor",   name: "Deep Anchor",         builtIn: true,
+    params: p({ pitch: -18, bass: 25, voiceDepth: 50, warmth: 20, presence: 50, clarity: 50, brightness: 15, compression: 65 }) },
+  { id: "bi:deep-cinematic",name: "Deep Cinematic",      builtIn: true,
+    params: p({ pitch: -30, bass: 45, voiceDepth: 70, warmth: 30, presence: 35, clarity: 40, treble: 5, reverb: 18, compression: 55 }) },
+  { id: "bi:deep-trailer",  name: "Deep Trailer Voice",  builtIn: true,
+    params: p({ pitch: -35, bass: 50, voiceDepth: 80, warmth: 20, presence: 45, clarity: 55, brightness: 10, compression: 75, stereoWidth: 20 }) },
+  { id: "bi:deep-smooth",   name: "Deep Smooth Baritone",builtIn: true,
+    params: p({ pitch: -20, bass: 28, voiceDepth: 48, warmth: 40, presence: 30, clarity: 38, treble: -5, compression: 45 }) },
 ];
 
 const KEY = "voice-studio:presets";
