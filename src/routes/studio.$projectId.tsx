@@ -146,7 +146,7 @@ function ProjectStudio() {
           </div>
 
           <div className="mt-6">
-            <WaveformPlayer blob={blob} fileName={project.name} />
+            <EditorWorkspace blob={blob} fileName={project.name} />
           </div>
 
           {reRecording ? (
