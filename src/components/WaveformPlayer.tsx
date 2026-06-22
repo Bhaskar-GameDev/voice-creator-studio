@@ -25,14 +25,14 @@ export function WaveformPlayer({ blob, fileName = "voice-studio-export" }: Props
     setReady(false);
     setError(null);
     const styles = getComputedStyle(document.documentElement);
-    const waveColor = styles.getPropertyValue("--waveform").trim() || "#666";
-    const progressColor = styles.getPropertyValue("--waveform-progress").trim() || "#f5a";
+    const waveColor = styles.getPropertyValue("--waveform").trim() || "#6b7280";
+    const progressColor = styles.getPropertyValue("--waveform-progress").trim() || "#f59e0b";
 
     const ws = WaveSurfer.create({
       container: containerRef.current,
-      waveColor: `oklch(${waveColor})`,
-      progressColor: `oklch(${progressColor})`,
-      cursorColor: `oklch(${progressColor})`,
+      waveColor,
+      progressColor,
+      cursorColor: progressColor,
       cursorWidth: 2,
       barWidth: 2,
       barGap: 2,
