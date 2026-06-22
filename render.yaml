@@ -7,7 +7,7 @@ services:
     # Use `npm install` not `npm ci`: npm ci mishandles esbuild's cross-platform
     # optional deps (EBADPLATFORM on @esbuild/aix-ppc64). npm install selects the
     # correct platform binary and skips the rest.
-    buildCommand: npm install && npm run build
+    buildCommand: npm install --include=dev && npm run build
     # Nitro node-server entry; binds to $PORT automatically.
     startCommand: node .output/server/index.mjs
     autoDeploy: true
