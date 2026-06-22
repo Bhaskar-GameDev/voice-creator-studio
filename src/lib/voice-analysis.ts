@@ -245,24 +245,27 @@ export async function analyzeBlob(blob: Blob): Promise<VoiceProfile> {
 }
 
 // ============================ Mapping ======================================
-// Map a band's balance ratio difference (ref vs source) to a slider value.
-// dB = 10·log10(refShare / srcShare); slider = clamp(dB / maxDb · 100 · strength).
+// Map a band's power-balance difference (ref vs source) to a slider value.
+// The raw dB difference is FIRST clamped to ±fullScaleDb so a wildly different
+// recording (e.g. a music-heavy clip vs a dry voice) can't produce a 30 dB swing
+// that pegs the slider — that was the source of "garbage" maxed-out values.
 function bandToSlider(
   refShare: number,
   srcShare: number,
-  maxDb: number,
+  fullScaleDb: number,
   strength: number,
-  { positiveOnly = false }: { positiveOnly?: boolean } = {},
+  { positiveOnly = false, cap = 100 }: { positiveOnly?: boolean; cap?: number } = {},
 ): number {
-  // Bands that are near-silent in BOTH clips carry no perceptual weight, but a
-  // tiny/tiny ratio can be huge — skip them so they don't slam the slider to ±100.
+  // Bands near-silent in BOTH clips carry no perceptual weight; a tiny/tiny ratio
+  // can be huge, so skip them rather than let noise drive the slider.
   const FLOOR = 0.003; // 0.3% of total spectral power
   if (Math.max(refShare, srcShare) < FLOOR) return 0;
   const EPS = 1e-6;
-  const db = 10 * Math.log10((refShare + EPS) / (srcShare + EPS));
-  let slider = (db / maxDb) * 100 * strength;
+  const dbRaw = 10 * Math.log10((refShare + EPS) / (srcShare + EPS));
+  const db = clamp(dbRaw, -fullScaleDb, fullScaleDb); // bound before scaling
+  let slider = (db / fullScaleDb) * 100 * strength;
   if (positiveOnly) slider = Math.max(0, slider);
-  return clamp(Math.round(slider), positiveOnly ? 0 : -100, 100);
+  return clamp(Math.round(slider), positiveOnly ? 0 : -cap, cap);
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -290,11 +293,20 @@ export function computeMatchParams(
   const params: EffectParams = { ...DEFAULT_PARAMS };
   const notes: string[] = [];
 
+  // Too little usable audio on either side → estimates are unreliable; bail to
+  // defaults rather than emit nonsense.
+  if (source.analyzedSeconds < 0.4 || reference.analyzedSeconds < 0.4) {
+    notes.push("Not enough clear audio to analyze — try a longer, cleaner clip.");
+    return { params, notes };
+  }
+
   // --- Pitch (cents from F0 ratio) ---
+  // Bound to ±7 semitones: bigger shifts wreck formants (chipmunk/monster) and
+  // usually mean an octave-detection error rather than a real difference.
   if (source.medianF0 && reference.medianF0) {
-    const cents = 1200 * Math.log2(reference.medianF0 / source.medianF0);
+    const cents = clamp(1200 * Math.log2(reference.medianF0 / source.medianF0), -700, 700);
     const PITCH_MAX = 1200; // engine maps ±100 slider -> ±1200 cents
-    params.pitch = clamp(Math.round((cents / PITCH_MAX) * 100 * s), -100, 100);
+    params.pitch = clamp(Math.round((cents / PITCH_MAX) * 100 * s), -70, 70);
     const semis = cents / 100;
     if (Math.abs(semis) >= 0.5) {
       notes.push(
@@ -307,15 +319,17 @@ export function computeMatchParams(
   }
 
   // --- Tonal balance (per-band EQ) ---
-  params.voiceDepth = bandToSlider(reference.balance.sub, source.balance.sub, 9, s, {
-    positiveOnly: true,
-  }); // engine maps 0..100 -> 0..9 dB
-  params.bass = bandToSlider(reference.balance.bass, source.balance.bass, 12, s);
-  params.warmth = bandToSlider(reference.balance.warmth, source.balance.warmth, 6, s);
-  params.presence = bandToSlider(reference.balance.presence, source.balance.presence, 8, s);
-  params.clarity = bandToSlider(reference.balance.clarity, source.balance.clarity, 6, s);
-  params.treble = bandToSlider(reference.balance.treble, source.balance.treble, 12, s);
-  params.brightness = bandToSlider(reference.balance.brightness, source.balance.brightness, 8, s);
+  // Per-band caps keep any single band from dominating, so a tonal mismatch
+  // becomes a tasteful nudge instead of a maxed-out, harsh result.
+  const b = reference.balance;
+  const a = source.balance;
+  params.voiceDepth = bandToSlider(b.sub, a.sub, 9, s, { positiveOnly: true, cap: 60 });
+  params.bass = bandToSlider(b.bass, a.bass, 12, s, { cap: 45 });
+  params.warmth = bandToSlider(b.warmth, a.warmth, 6, s, { cap: 35 });
+  params.presence = bandToSlider(b.presence, a.presence, 8, s, { cap: 35 });
+  params.clarity = bandToSlider(b.clarity, a.clarity, 6, s, { cap: 30 });
+  params.treble = bandToSlider(b.treble, a.treble, 12, s, { cap: 40 });
+  params.brightness = bandToSlider(b.brightness, a.brightness, 8, s, { cap: 35 });
 
   // Brightness note from centroid difference
   if (source.centroid > 0 && reference.centroid > 0) {
