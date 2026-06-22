@@ -25,6 +25,9 @@ export interface ExtractResult {
 const MAX_BYTES = 25 * 1024 * 1024; // 25 MB
 // yt-dlp can hang on auth walls / slow CDNs — bound it.
 const TIMEOUT_MS = 45_000;
+// Hosts that bundle yt-dlp at a fixed path (e.g. Render build downloads it to
+// ./bin/yt-dlp) set YT_DLP_PATH. Falls back to a PATH-resolved "yt-dlp".
+const YT_DLP = process.env.YT_DLP_PATH || "yt-dlp";
 
 function isHttpUrl(value: string): boolean {
   try {
@@ -52,7 +55,7 @@ export const extractAudio = createServerFn({ method: "POST" })
     // Probe for yt-dlp first so we can give the "unavailable" signal cleanly.
     const hasYtDlp = await new Promise<boolean>((resolve) => {
       try {
-        const probe = spawn("yt-dlp", ["--version"]);
+        const probe = spawn(YT_DLP, ["--version"]);
         probe.on("error", () => resolve(false));
         probe.on("close", (code) => resolve(code === 0));
       } catch {
@@ -91,7 +94,7 @@ export const extractAudio = createServerFn({ method: "POST" })
       ];
 
       const result = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
-        const proc = spawn("yt-dlp", args);
+        const proc = spawn(YT_DLP, args);
         let stderr = "";
         const timer = setTimeout(() => {
           try {

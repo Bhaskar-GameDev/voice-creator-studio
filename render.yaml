@@ -7,7 +7,11 @@ services:
     # Use `npm install` not `npm ci`: npm ci mishandles esbuild's cross-platform
     # optional deps (EBADPLATFORM on @esbuild/aix-ppc64). npm install selects the
     # correct platform binary and skips the rest.
-    buildCommand: npm install --include=dev && npm run build
+    #
+    # yt-dlp: download the self-contained Linux build (no Python/ffmpeg needed)
+    # into ./bin so the "Match a Voice → Link" extractor works. YT_DLP_PATH below
+    # points the server at it. Build/runtime share the filesystem on Render.
+    buildCommand: mkdir -p bin && curl -fL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o bin/yt-dlp && chmod +x bin/yt-dlp && npm install --include=dev && npm run build
     # Nitro node-server entry; binds to $PORT automatically.
     startCommand: node .output/server/index.mjs
     autoDeploy: true
@@ -17,3 +21,7 @@ services:
         value: "22"
       - key: NODE_ENV
         value: production
+      # Absolute path to the yt-dlp binary fetched in buildCommand. Render's
+      # project root at runtime is /opt/render/project/src.
+      - key: YT_DLP_PATH
+        value: /opt/render/project/src/bin/yt-dlp
