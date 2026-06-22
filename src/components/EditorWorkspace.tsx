@@ -23,6 +23,7 @@ import {
   newPresetId, sanitizeParams, saveCustomPreset, type Preset,
 } from "@/lib/presets";
 import { getProject, saveProject, formatDuration } from "@/lib/projects";
+import { VoiceMatchCard } from "@/components/VoiceMatchCard";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { diagnostics } from "@/lib/diagnostics";
@@ -678,11 +679,18 @@ export function EditorWorkspace({ blob, fileName, projectId, initialParams: rawI
         </div>
       </div>
 
-      {/* ====== Right: presets ====== */}
+      {/* ====== Right: voice match + presets ====== */}
       <PresetSidebar
         currentParams={params}
         customPresets={customPresets}
         onApply={applyPreset}
+        headerSlot={
+          <VoiceMatchCard
+            getSourceBuffer={() => engineRef.current?.buffer ?? null}
+            onApply={(p) => applyParams(p)}
+            disabled={!ready}
+          />
+        }
       />
     </div>
   );
@@ -740,11 +748,12 @@ const ParamSlider = memo(function ParamSlider({
 
 // ---------- Preset sidebar ----------
 const PresetSidebar = memo(function PresetSidebar({
-  currentParams, customPresets, onApply,
+  currentParams, customPresets, onApply, headerSlot,
 }: {
   currentParams: EffectParams;
   customPresets: Preset[];
   onApply: (p: Preset) => void;
+  headerSlot?: React.ReactNode;
 }) {
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
@@ -800,6 +809,7 @@ const PresetSidebar = memo(function PresetSidebar({
 
   return (
     <aside className="space-y-4 lg:sticky lg:top-20 lg:self-start">
+      {headerSlot}
       <div className="rounded-xl border bg-card/60 p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="font-display font-semibold flex items-center gap-2">
