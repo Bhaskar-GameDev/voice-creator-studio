@@ -687,7 +687,12 @@ export function EditorWorkspace({ blob, fileName, projectId, initialParams: rawI
         headerSlot={
           <VoiceMatchCard
             getSourceBuffer={() => engineRef.current?.buffer ?? null}
-            onApply={(p) => applyParams(p)}
+            onApply={(p) => {
+              applyParams(p);
+              // Auto-preview: start playback so the match is immediately audible
+              // (params only reach the live signal while audio is playing).
+              if (!playing) engineRef.current?.play();
+            }}
             disabled={!ready}
           />
         }

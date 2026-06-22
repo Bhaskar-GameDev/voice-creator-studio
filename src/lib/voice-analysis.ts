@@ -195,8 +195,7 @@ export function analyzeBuffer(buffer: AudioBuffer): VoiceProfile {
     balance[name] = total > 0 ? bandPower[name] / total : 0;
   }
 
-  const f0sSorted = f0s.slice().sort((a, b) => a - b);
-  const medianF0 = f0sSorted.length ? f0sSorted[Math.floor(f0sSorted.length / 2)] : null;
+  const medianF0 = medianWithOctaveFix(f0s);
 
   return {
     medianF0,
@@ -204,6 +203,25 @@ export function analyzeBuffer(buffer: AudioBuffer): VoiceProfile {
     centroid: total > 0 ? centroidNum / total : 0,
     analyzedSeconds: (voicedFrames * HOP) / sr,
   };
+}
+
+// Autocorrelation often locks onto a sub-/super-octave for some frames, which
+// splits the F0 distribution and corrupts a plain median. Fold every estimate
+// to within an octave of the rough median, then take the median of that.
+function medianWithOctaveFix(values: number[]): number | null {
+  if (!values.length) return null;
+  const median = (arr: number[]) => {
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  };
+  const rough = median(values);
+  const folded = values.map((v) => {
+    let x = v;
+    while (x > rough * 1.5) x /= 2;
+    while (x < rough * 0.67) x *= 2;
+    return x;
+  });
+  return median(folded);
 }
 
 /** Decode a Blob/File and analyze it. Caller must run this in the browser. */
@@ -236,7 +254,11 @@ function bandToSlider(
   strength: number,
   { positiveOnly = false }: { positiveOnly?: boolean } = {},
 ): number {
-  const EPS = 1e-9;
+  // Bands that are near-silent in BOTH clips carry no perceptual weight, but a
+  // tiny/tiny ratio can be huge — skip them so they don't slam the slider to ±100.
+  const FLOOR = 0.003; // 0.3% of total spectral power
+  if (Math.max(refShare, srcShare) < FLOOR) return 0;
+  const EPS = 1e-6;
   const db = 10 * Math.log10((refShare + EPS) / (srcShare + EPS));
   let slider = (db / maxDb) * 100 * strength;
   if (positiveOnly) slider = Math.max(0, slider);
