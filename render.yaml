@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: voice-studio
+    runtime: node
+    plan: free
+    # Build a standalone Node server (vite.config.ts sets nitro preset "node-server").
+    buildCommand: npm ci && npm run build
+    # Nitro node-server entry; binds to $PORT automatically.
+    startCommand: node .output/server/index.mjs
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
