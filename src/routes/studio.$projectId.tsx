@@ -58,9 +58,13 @@ function ProjectStudio() {
     const trimmed = name.trim();
     if (!trimmed) { toast.error("Name cannot be empty"); return; }
     const next = { ...project, name: trimmed, updatedAt: Date.now() };
-    saveProject(next);
-    setProject(next);
-    toast.success("Saved");
+    try {
+      saveProject(next);
+      setProject(next);
+      toast.success("Saved");
+    } catch {
+      toast.error("Could not save name. Device storage may be full.");
+    }
   };
 
   const onRemove = async () => {
@@ -71,13 +75,17 @@ function ProjectStudio() {
 
   const onReRecorded = async (newBlob: Blob, duration: number) => {
     if (!project) return;
-    await putAudio(project.id, newBlob);
-    const next = { ...project, mimeType: newBlob.type, size: newBlob.size, duration, updatedAt: Date.now() };
-    saveProject(next);
-    setProject(next);
-    setBlob(newBlob);
-    setReRecording(false);
-    toast.success("Recording replaced");
+    try {
+      await putAudio(project.id, newBlob);
+      const next = { ...project, mimeType: newBlob.type, size: newBlob.size, duration, updatedAt: Date.now() };
+      saveProject(next);
+      setProject(next);
+      setBlob(newBlob);
+      setReRecording(false);
+      toast.success("Recording replaced");
+    } catch {
+      toast.error("Could not replace recording. Device storage may be full.");
+    }
   };
 
   return (
@@ -146,7 +154,13 @@ function ProjectStudio() {
           </div>
 
           <div className="mt-6">
-            <EditorWorkspace blob={blob} fileName={project.name} />
+            <EditorWorkspace
+              key={project.id}
+              blob={blob}
+              fileName={project.name}
+              projectId={project.id}
+              initialParams={project.effects}
+            />
           </div>
 
           {reRecording ? (

@@ -17,7 +17,12 @@ export function UploadDropzone({ onFile }: Props) {
   const handle = (file: File | null | undefined) => {
     setError(null);
     if (!file) return;
-    if (!file.type.startsWith("audio/")) {
+    
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    const isAudioType = file.type.startsWith("audio/");
+    const isAudioExt = ["mp3", "wav", "m4a", "ogg", "webm", "aac", "flac"].includes(ext || "");
+    
+    if (!isAudioType && !isAudioExt) {
       setError(`Unsupported format: ${file.type || file.name}. Please upload an audio file.`);
       return;
     }

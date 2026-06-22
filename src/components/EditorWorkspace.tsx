@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import {
   Play, Pause, Square, Download, RotateCcw, Undo2, Redo2,
   Save, Share2, Copy, Trash2, Pencil, Sparkles, Check, X,
+  Repeat, SkipForward, SkipBack, Loader2, AlertCircle, Import,
+  Volume2, VolumeX,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -12,24 +14,43 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { AudioEngine, DEFAULT_PARAMS, PARAM_META, type EffectParams } from "@/lib/audio-engine";
 import {
-  BUILTIN_PRESETS, deleteCustomPreset, encodePreset, listCustomPresets,
-  newPresetId, saveCustomPreset, type Preset,
+  BUILTIN_PRESETS, decodePreset, deleteCustomPreset, encodePreset, listCustomPresets,
+  newPresetId, sanitizeParams, saveCustomPreset, type Preset,
 } from "@/lib/presets";
-import { formatDuration } from "@/lib/projects";
+import { getProject, saveProject, formatDuration } from "@/lib/projects";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { diagnostics } from "@/lib/diagnostics";
 
 interface Props {
   blob: Blob;
   fileName: string;
+  projectId?: string;
+  initialParams?: EffectParams;
 }
 
 const PARAM_KEYS = Object.keys(PARAM_META) as (keyof EffectParams)[];
 const HISTORY_LIMIT = 50;
 
-export function EditorWorkspace({ blob, fileName }: Props) {
+// Strip characters illegal in filenames (/, \, :, *, ?, ", <, >, |) so downloads
+// of projects named from toLocaleString (e.g. "Recording 6/22/2026, 3:45 PM") work.
+function safeFileName(name: string): string {
+  const cleaned = name.replace(/[/\\:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+  return cleaned || "voice-studio-export";
+}
+
+export function EditorWorkspace({ blob, fileName, projectId, initialParams: rawInitialParams }: Props) {
+  // Persisted effects may be corrupted (manual storage edits, version drift); sanitize
+  // so out-of-range/NaN values can't reach Web Audio params and brick the workspace.
+  const initialParams = useMemo(
+    () => (rawInitialParams ? sanitizeParams(rawInitialParams) : DEFAULT_PARAMS),
+    [rawInitialParams],
+  );
   // ----- Engine + audio state -----
   const engineRef = useRef<AudioEngine | null>(null);
   const waveContainer = useRef<HTMLDivElement>(null);
@@ -41,15 +62,58 @@ export function EditorWorkspace({ blob, fileName }: Props) {
   const [duration, setDuration] = useState(0);
   const [bypass, setBypass] = useState(false);
 
+  // Playback enhancements
+  const [speed, setSpeed] = useState(1.0);
+  const [loop, setLoop] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  const [exportingOriginal, setExportingOriginal] = useState(false);
+
   // ----- Params + history -----
-  const [params, setParams] = useState<EffectParams>(DEFAULT_PARAMS);
-  const historyRef = useRef<EffectParams[]>([DEFAULT_PARAMS]);
+  const [params, setParams] = useState<EffectParams>(initialParams ?? DEFAULT_PARAMS);
+  const historyRef = useRef<EffectParams[]>([initialParams ?? DEFAULT_PARAMS]);
   const historyIndex = useRef(0);
   const [historyVersion, setHistoryVersion] = useState(0); // triggers re-render for undo/redo button state
   const commitTimer = useRef<number | null>(null);
 
   // ----- Presets -----
   const [customPresets, setCustomPresets] = useState<Preset[]>([]);
+
+  // Lock for rapid button clicks
+  const startTransition = () => {
+    setIsTransitioning(true);
+    setTimeout(() => setIsTransitioning(false), 300);
+  };
+
+  // Cleanup timers on unmount to prevent memory leaks/stale updates
+  useEffect(() => {
+    return () => {
+      if (commitTimer.current) window.clearTimeout(commitTimer.current);
+    };
+  }, []);
+
+  // Session recovery: save active project ID to local storage
+  useEffect(() => {
+    if (projectId) {
+      localStorage.setItem("voice-studio:active-project-id", projectId);
+    }
+  }, [projectId]);
+
+  // Auto-save effects parameters to project in local storage
+  const autoSaveParams = useCallback((nextParams: EffectParams) => {
+    if (!projectId) return;
+    try {
+      const p = getProject(projectId);
+      if (p) {
+        p.effects = nextParams;
+        p.updatedAt = Date.now();
+        saveProject(p);
+      }
+    } catch (err) {
+      console.error("Auto-save parameters failed:", err);
+    }
+  }, [projectId]);
 
   // ===== Load engine + waveform =====
   useEffect(() => {
@@ -67,10 +131,24 @@ export function EditorWorkspace({ blob, fileName }: Props) {
 
     engine.load(blob).then(() => {
       if (cancelled) return;
-      setDuration(engine.duration());
+      const dur = engine.duration();
+      if (dur < 0.5) {
+        setLoadError("Audio clip is too short (minimum 0.5 seconds is required).");
+        diagnostics.log("error", "audio", "Load aborted: Audio clip is too short (less than 0.5s)");
+        return;
+      }
+      engine.setAll(params, true);
+      engine.setPlaybackSpeed(speed);
+      engine.setLoop(loop);
+      engine.setVolume(muted ? 0 : volume);
+      setDuration(dur);
       setReady(true);
+      diagnostics.log("success", "audio", `Decoded audio buffer successfully (Duration: ${dur.toFixed(2)}s)`);
     }).catch((e) => {
-      if (!cancelled) setLoadError(e?.message ?? "Could not decode audio");
+      if (!cancelled) {
+        setLoadError(e?.message ?? "Could not decode audio file");
+        diagnostics.log("error", "audio", "Could not decode audio file", e?.message || String(e));
+      }
     });
 
     return () => {
@@ -122,12 +200,57 @@ export function EditorWorkspace({ blob, fileName }: Props) {
   }, []);
 
   // ===== Transport =====
-  const toggle = () => playing ? engineRef.current?.pause() : engineRef.current?.play();
-  const stop = () => engineRef.current?.stop();
-  const onSeek = (v: number[]) => engineRef.current?.seek(v[0] ?? 0);
+  const toggle = () => {
+    if (isTransitioning) return;
+    startTransition();
+    playing ? engineRef.current?.pause() : engineRef.current?.play();
+  };
+  const stop = () => {
+    if (isTransitioning) return;
+    startTransition();
+    engineRef.current?.stop();
+  };
+  const onSeek = (v: number[]) => {
+    engineRef.current?.seek(v[0] ?? 0);
+  };
   const handleBypass = (b: boolean) => {
     setBypass(b);
     engineRef.current?.setBypass(b);
+  };
+
+  const handleSpeedChange = (v: string) => {
+    const newSpeed = parseFloat(v);
+    setSpeed(newSpeed);
+    engineRef.current?.setPlaybackSpeed(newSpeed);
+    toast.success(`Speed: ${newSpeed}x`);
+  };
+
+  const handleVolume = (v: number[]) => {
+    const nv = (v[0] ?? 100) / 100;
+    setVolume(nv);
+    if (muted && nv > 0) setMuted(false);
+    engineRef.current?.setVolume(nv);
+  };
+
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
+    engineRef.current?.setVolume(next ? 0 : volume);
+  };
+
+  const toggleLoop = () => {
+    if (isTransitioning) return;
+    startTransition();
+    const next = !loop;
+    setLoop(next);
+    engineRef.current?.setLoop(next);
+    toast.success(next ? "Looping enabled" : "Looping disabled");
+  };
+
+  const handleJump = (offset: number) => {
+    if (isTransitioning) return;
+    startTransition();
+    engineRef.current?.jump(offset);
   };
 
   // ===== Param updates =====
@@ -139,7 +262,8 @@ export function EditorWorkspace({ blob, fileName }: Props) {
     historyRef.current = stack;
     historyIndex.current = stack.length - 1;
     setHistoryVersion((v) => v + 1);
-  }, []);
+    autoSaveParams(next);
+  }, [autoSaveParams]);
 
   const updateParam = useCallback((key: keyof EffectParams, value: number) => {
     setParams((prev) => {
@@ -160,49 +284,133 @@ export function EditorWorkspace({ blob, fileName }: Props) {
     if (recordHistory) commitHistory(next);
   }, [commitHistory]);
 
-  const resetParam = (key: keyof EffectParams) => updateParam(key, DEFAULT_PARAMS[key]);
-  const resetAll = () => applyParams(DEFAULT_PARAMS);
+  const resetParam = useCallback((key: keyof EffectParams) => updateParam(key, DEFAULT_PARAMS[key]), [updateParam]);
+  const resetAll = () => {
+    if (isTransitioning) return;
+    startTransition();
+    applyParams(DEFAULT_PARAMS);
+  };
 
   const canUndo = historyIndex.current > 0;
   const canRedo = historyIndex.current < historyRef.current.length - 1;
-  const undo = () => {
-    if (!canUndo) return;
+  
+  const undo = useCallback(() => {
+    if (!canUndo || isTransitioning) return;
+    startTransition();
     historyIndex.current -= 1;
     const next = historyRef.current[historyIndex.current];
     setParams(next);
     engineRef.current?.setAll(next);
     setHistoryVersion((v) => v + 1);
-  };
-  const redo = () => {
-    if (!canRedo) return;
+    autoSaveParams(next);
+    diagnostics.log("info", "state", "Undo effects parameters edit");
+  }, [canUndo, isTransitioning, autoSaveParams]);
+
+  const redo = useCallback(() => {
+    if (!canRedo || isTransitioning) return;
+    startTransition();
     historyIndex.current += 1;
     const next = historyRef.current[historyIndex.current];
     setParams(next);
     engineRef.current?.setAll(next);
     setHistoryVersion((v) => v + 1);
-  };
+    autoSaveParams(next);
+    diagnostics.log("info", "state", "Redo effects parameters edit");
+  }, [canRedo, isTransitioning, autoSaveParams]);
 
-  // Keyboard shortcuts: space play/pause, B toggle bypass, ⌘/Ctrl Z/Y undo/redo
+  // Keep references fresh for shortcuts to avoid stale closures
+  const toggleRef = useRef(toggle);
+  const undoRef = useRef(undo);
+  const redoRef = useRef(redo);
+  const handleBypassRef = useRef(handleBypass);
+  const toggleLoopRef = useRef(toggleLoop);
+  const handleJumpRef = useRef(handleJump);
+  const toggleMuteRef = useRef(toggleMute);
+
+  useEffect(() => {
+    toggleRef.current = toggle;
+    undoRef.current = undo;
+    redoRef.current = redo;
+    handleBypassRef.current = handleBypass;
+    toggleLoopRef.current = toggleLoop;
+    handleJumpRef.current = handleJump;
+    toggleMuteRef.current = toggleMute;
+  }, [toggle, undo, redo, handleBypass, toggleLoop, handleJump, toggleMute]);
+
+  // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const role = (e.target as HTMLElement)?.getAttribute("role");
+      const isInteractive =
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "BUTTON" ||
+        tag === "SELECT" ||
+        tag === "A" ||
+        (e.target as HTMLElement)?.isContentEditable ||
+        role === "button" ||
+        role === "combobox" ||
+        role === "slider" ||
+        role === "tab" ||
+        role === "option";
+
+      if (isInteractive) {
+        if (e.code === "Space" || e.code === "Enter") return;
+      }
       const meta = e.metaKey || e.ctrlKey;
-      if (meta && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
-      if (meta && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
-      if (e.code === "Space") { e.preventDefault(); toggle(); return; }
-      if (e.key.toLowerCase() === "b") { handleBypass(!bypass); return; }
+      
+      if (meta && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redoRef.current();
+        else undoRef.current();
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        redoRef.current();
+        return;
+      }
+      if (e.code === "Space") {
+        e.preventDefault();
+        toggleRef.current();
+        return;
+      }
+      if (e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        handleBypassRef.current(!bypass);
+        return;
+      }
+      if (e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        toggleLoopRef.current();
+        return;
+      }
+      if (e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        toggleMuteRef.current();
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        handleJumpRef.current(-5);
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        handleJumpRef.current(5);
+        return;
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bypass, playing]);
+  }, [bypass]);
 
   // ===== Presets =====
-  const applyPreset = (preset: Preset) => {
+  const applyPreset = useCallback((preset: Preset) => {
     applyParams(preset.params);
     toast.success(`Applied "${preset.name}"`);
-  };
+  }, [applyParams]);
 
   const isDirty = useMemo(
     () => PARAM_KEYS.some((k) => params[k] !== DEFAULT_PARAMS[k]),
@@ -211,30 +419,75 @@ export function EditorWorkspace({ blob, fileName }: Props) {
 
   // ===== Export with effects =====
   const [exporting, setExporting] = useState(false);
+  
   const exportProcessed = async () => {
     const engine = engineRef.current;
-    if (!engine || !engine.buffer) return;
+    if (!engine || !engine.buffer || exporting || exportingOriginal) return;
     setExporting(true);
+    diagnostics.exportCount++;
+    diagnostics.log("info", "export", "Started exporting edited WAV audio");
+    toast.info("Rendering edited audio... please wait.");
     try {
       const wav = await renderProcessedToWav(engine.buffer, params);
       const a = document.createElement("a");
       a.href = URL.createObjectURL(wav);
-      a.download = `${fileName} - processed.wav`;
+      a.download = `${safeFileName(fileName)} - processed.wav`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      toast.success("Export complete");
+      toast.success("Edited audio exported successfully!");
+      diagnostics.log("success", "export", "Edited WAV audio exported successfully");
     } catch (e: any) {
-      toast.error(e?.message ?? "Export failed");
+      diagnostics.exportFailures++;
+      diagnostics.log("error", "export", "Edited WAV audio export failed", e?.message || String(e));
+      toast.error(e?.message ?? "Export failed. Please try again.");
     } finally {
       setExporting(false);
     }
   };
 
+  const exportOriginal = async () => {
+    if (!ready || exporting || exportingOriginal) return;
+    setExportingOriginal(true);
+    diagnostics.exportCount++;
+    diagnostics.log("info", "export", "Started exporting original audio file");
+    toast.info("Preparing original audio export...");
+    try {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      const ext = blob.type.includes("wav") ? "wav" : blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
+      a.download = `${safeFileName(fileName)} - original.${ext}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast.success("Original audio exported successfully!");
+      diagnostics.log("success", "export", "Original audio exported successfully");
+    } catch (e: any) {
+      diagnostics.exportFailures++;
+      diagnostics.log("error", "export", "Original audio export failed", e?.message || String(e));
+      toast.error(e?.message ?? "Original export failed.");
+    } finally {
+      setExportingOriginal(false);
+    }
+  };
+
+  // Warn if browser closes during export
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (exporting || exportingOriginal) {
+        e.preventDefault();
+        e.returnValue = "An export is in progress. Leaving will abort the export.";
+        return e.returnValue;
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [exporting, exportingOriginal]);
+
   // ===== Render =====
   if (loadError) {
     return (
       <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-6 text-sm">
-        Could not load audio: {loadError}
+        <div className="flex items-center gap-2 font-medium text-destructive"><AlertCircle className="h-4 w-4" /> Could not load workspace</div>
+        <p className="mt-2 text-muted-foreground">{loadError}</p>
       </div>
     );
   }
@@ -279,32 +532,128 @@ export function EditorWorkspace({ blob, fileName }: Props) {
           </div>
 
           {/* Transport */}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={toggle} disabled={!ready} size="lg" className="gap-2">
-              {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-              {playing ? "Pause" : "Play"}
-            </Button>
-            <Button onClick={stop} disabled={!ready} variant="secondary" size="lg" className="gap-2">
-              <Square className="h-4 w-4" /> Stop
-            </Button>
-            <div className="ml-auto flex gap-2">
-              <Button onClick={undo} disabled={!canUndo} variant="ghost" size="icon" aria-label="Undo" title="Undo (⌘Z)">
-                <Undo2 className="h-4 w-4" />
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Button onClick={toggle} disabled={!ready || isTransitioning} size="lg" className="gap-2">
+                {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                {playing ? "Pause" : "Play"}
               </Button>
-              <Button onClick={redo} disabled={!canRedo} variant="ghost" size="icon" aria-label="Redo" title="Redo (⌘⇧Z)">
-                <Redo2 className="h-4 w-4" />
+              <Button onClick={stop} disabled={!ready || isTransitioning} variant="secondary" size="lg" className="gap-2">
+                <Square className="h-4 w-4" /> Stop
               </Button>
-              <Button onClick={resetAll} disabled={!isDirty} variant="ghost" size="sm" className="gap-1.5">
-                <RotateCcw className="h-3.5 w-3.5" /> Reset all
+            </div>
+
+            <div className="flex items-center gap-1 border-l border-r px-2 py-0.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={!ready || isTransitioning}
+                onClick={() => handleJump(-5)}
+                title="Jump backward 5s (←)"
+                aria-label="Jump backward 5s"
+              >
+                <SkipBack className="h-4 w-4" />
               </Button>
-              <Button onClick={exportProcessed} disabled={!ready || exporting} className="gap-2">
-                <Download className="h-4 w-4" /> {exporting ? "Rendering…" : "Export"}
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={!ready || isTransitioning}
+                onClick={() => handleJump(5)}
+                title="Jump forward 5s (→)"
+                aria-label="Jump forward 5s"
+              >
+                <SkipForward className="h-4 w-4" />
               </Button>
+              <Button
+                variant={loop ? "secondary" : "ghost"}
+                size="icon"
+                disabled={!ready || isTransitioning}
+                onClick={toggleLoop}
+                title="Loop playback (L)"
+                aria-label="Loop playback"
+                className={cn(loop && "bg-primary/20 text-primary hover:bg-primary/30")}
+              >
+                <Repeat className="h-4 w-4" />
+              </Button>
+              <Select value={String(speed)} onValueChange={handleSpeedChange} disabled={!ready}>
+                <SelectTrigger className="w-[85px] h-9 ml-1" aria-label="Playback speed">
+                  <SelectValue placeholder="1.0x" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0.5">0.5x</SelectItem>
+                  <SelectItem value="0.75">0.75x</SelectItem>
+                  <SelectItem value="1">1.0x</SelectItem>
+                  <SelectItem value="1.25">1.25x</SelectItem>
+                  <SelectItem value="1.5">1.5x</SelectItem>
+                  <SelectItem value="2">2.0x</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex items-center gap-2 border-r pr-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={!ready}
+                onClick={toggleMute}
+                title={muted ? "Unmute (M)" : "Mute (M)"}
+                aria-label={muted ? "Unmute" : "Mute"}
+              >
+                {muted || volume === 0 ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+              </Button>
+              <Slider
+                value={[muted ? 0 : Math.round(volume * 100)]}
+                max={100}
+                step={1}
+                onValueChange={handleVolume}
+                disabled={!ready}
+                aria-label="Output volume"
+                className="w-24"
+              />
+            </div>
+
+            <div className="ml-auto flex items-center gap-2 flex-1 sm:flex-initial justify-between sm:justify-start w-full sm:w-auto">
+              <div className="flex items-center gap-1">
+                <Button onClick={undo} disabled={!canUndo || isTransitioning} variant="ghost" size="icon" aria-label="Undo" title="Undo (⌘Z)">
+                  <Undo2 className="h-4 w-4" />
+                </Button>
+                <Button onClick={redo} disabled={!canRedo || isTransitioning} variant="ghost" size="icon" aria-label="Redo" title="Redo (⌘⇧Z)">
+                  <Redo2 className="h-4 w-4" />
+                </Button>
+                <Button onClick={resetAll} disabled={!isDirty || isTransitioning} variant="ghost" size="sm" className="gap-1.5">
+                  <RotateCcw className="h-3.5 w-3.5" /> Reset all
+                </Button>
+              </div>
+
+              <div className="flex items-center gap-2 ml-auto">
+                <Button
+                  onClick={exportOriginal}
+                  disabled={!ready || exportingOriginal || exporting}
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                >
+                  {exportingOriginal ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                  Original
+                </Button>
+                <Button
+                  onClick={exportProcessed}
+                  disabled={!ready || exporting || exportingOriginal}
+                  size="sm"
+                  className="gap-2 bg-gradient-to-r from-primary to-primary-foreground shadow"
+                >
+                  {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                  {exporting ? "Rendering…" : "Export"}
+                </Button>
+              </div>
             </div>
           </div>
           <p className="text-[11px] text-muted-foreground">
             Tips: <kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">Space</kbd> play/pause ·
             {" "}<kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">B</kbd> A/B compare ·
+            {" "}<kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">L</kbd> Loop ·
+            {" "}<kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">M</kbd> Mute ·
+            {" "}<kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">← / →</kbd> Jump 5s ·
             {" "}<kbd className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">⌘Z</kbd> undo
           </p>
         </div>
@@ -321,8 +670,8 @@ export function EditorWorkspace({ blob, fileName }: Props) {
                 key={key}
                 paramKey={key}
                 value={params[key]}
-                onChange={(v) => updateParam(key, v)}
-                onReset={() => resetParam(key)}
+                onChange={updateParam}
+                onReset={resetParam}
               />
             ))}
           </div>
@@ -340,13 +689,15 @@ export function EditorWorkspace({ blob, fileName }: Props) {
 }
 
 // ---------- Slider row ----------
-function ParamSlider({
+// Memoized so the 60fps playback-time re-renders of the parent don't re-render
+// every slider — only the slider whose value actually changed updates.
+const ParamSlider = memo(function ParamSlider({
   paramKey, value, onChange, onReset,
 }: {
   paramKey: keyof EffectParams;
   value: number;
-  onChange: (v: number) => void;
-  onReset: () => void;
+  onChange: (key: keyof EffectParams, value: number) => void;
+  onReset: (key: keyof EffectParams) => void;
 }) {
   const meta = PARAM_META[paramKey];
   const isDefault = value === DEFAULT_PARAMS[paramKey];
@@ -363,7 +714,7 @@ function ParamSlider({
           </span>
           <button
             type="button"
-            onClick={onReset}
+            onClick={() => onReset(paramKey)}
             disabled={isDefault}
             className="rounded p-0.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
             aria-label={`Reset ${meta.label}`}
@@ -379,16 +730,16 @@ function ParamSlider({
         min={meta.min}
         max={meta.max}
         step={1}
-        onValueChange={(v) => onChange(v[0] ?? 0)}
+        onValueChange={(v) => onChange(paramKey, v[0] ?? 0)}
         aria-label={meta.label}
       />
       <p className="mt-1 text-[11px] text-muted-foreground">{meta.description}</p>
     </div>
   );
-}
+});
 
 // ---------- Preset sidebar ----------
-function PresetSidebar({
+const PresetSidebar = memo(function PresetSidebar({
   currentParams, customPresets, onApply,
 }: {
   currentParams: EffectParams;
@@ -400,6 +751,20 @@ function PresetSidebar({
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [shareCode, setShareCode] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importCode, setImportCode] = useState("");
+
+  const doImport = () => {
+    const decoded = decodePreset(importCode.trim());
+    if (!decoded) {
+      toast.error("Invalid preset code. Check you copied the whole thing.");
+      return;
+    }
+    saveCustomPreset({ id: newPresetId(), name: decoded.name, params: decoded.params });
+    setImportOpen(false);
+    setImportCode("");
+    toast.success(`Imported "${decoded.name}"`);
+  };
 
   const doSave = () => {
     const name = saveName.trim();
@@ -459,6 +824,29 @@ function PresetSidebar({
       <div className="rounded-xl border bg-card/60 p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <h3 className="font-display font-semibold">My Presets</h3>
+          <div className="flex items-center gap-1.5">
+          <Dialog open={importOpen} onOpenChange={setImportOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" variant="ghost" className="gap-1.5"><Import className="h-3.5 w-3.5" /> Import</Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Import preset</DialogTitle>
+                <DialogDescription>Paste a shared preset code to add it to your presets.</DialogDescription>
+              </DialogHeader>
+              <textarea
+                value={importCode}
+                onChange={(e) => setImportCode(e.target.value)}
+                placeholder="Paste preset code here…"
+                className="h-32 w-full resize-none rounded-md border bg-background p-3 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                autoFocus
+              />
+              <DialogFooter>
+                <Button variant="ghost" onClick={() => setImportOpen(false)}>Cancel</Button>
+                <Button onClick={doImport} disabled={!importCode.trim()}>Import preset</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
             <DialogTrigger asChild>
               <Button size="sm" variant="secondary" className="gap-1.5"><Save className="h-3.5 w-3.5" /> Save</Button>
@@ -485,6 +873,7 @@ function PresetSidebar({
               </DialogFooter>
             </DialogContent>
           </Dialog>
+          </div>
         </div>
 
         {customPresets.length === 0 ? (
@@ -571,7 +960,7 @@ function PresetSidebar({
       </Dialog>
     </aside>
   );
-}
+});
 
 function IconBtn({
   children, label, onClick, danger,

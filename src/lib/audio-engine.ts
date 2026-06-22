@@ -67,13 +67,17 @@ export class AudioEngine {
   splitter!: ChannelSplitterNode;
   merger!: ChannelMergerNode;
   delayR!: DelayNode;
+  masterGain!: GainNode;       // output volume (monitoring only, not baked into export)
 
   private params: EffectParams = { ...DEFAULT_PARAMS };
+  private volume = 1;
   private playing = false;
   private bypass = false;
   private startedAt = 0;
   private pausedAt = 0;
   private rafId: number | null = null;
+  playbackSpeed = 1.0;
+  loop = false;
 
   onTimeUpdate?: (t: number) => void;
   onEnded?: () => void;
@@ -97,8 +101,11 @@ export class AudioEngine {
   currentTime(): number {
     if (!this.ctx || !this.buffer) return 0;
     if (this.playing) {
-      const t = this.ctx.currentTime - this.startedAt;
-      return Math.min(t, this.buffer.duration);
+      const elapsedSec = (this.ctx.currentTime - this.startedAt) * this.playbackSpeed;
+      if (this.loop) {
+        return elapsedSec % this.buffer.duration;
+      }
+      return Math.min(elapsedSec, this.buffer.duration);
     }
     return this.pausedAt;
   }
@@ -164,11 +171,26 @@ export class AudioEngine {
     this.splitter.connect(this.delayR, 1, 0);
     this.delayR.connect(this.merger, 0, 1);
 
-    this.merger.connect(this.wetChain).connect(ctx.destination);
+    // Master volume node sits before destination on both paths
+    this.masterGain = ctx.createGain();
+    this.masterGain.gain.value = this.volume;
 
-    // Bypass path connects directly when source is created (so source -> dryBypass -> dest)
-    this.dryBypass.connect(ctx.destination);
+    this.merger.connect(this.wetChain).connect(this.masterGain);
+
+    // Bypass path connects directly when source is created (so source -> dryBypass -> master)
+    this.dryBypass.connect(this.masterGain);
+
+    this.masterGain.connect(ctx.destination);
   }
+
+  setVolume(v: number) {
+    this.volume = Math.max(0, Math.min(1, v));
+    if (this.ctx && this.masterGain) {
+      this.masterGain.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.015);
+    }
+  }
+
+  getVolume(): number { return this.volume; }
 
   setParam<K extends keyof EffectParams>(key: K, value: number, immediate = false) {
     this.params[key] = value;
@@ -236,11 +258,14 @@ export class AudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = this.buffer;
     src.detune.value = lerp(this.params.pitch, -100, 100, -1200, 1200);
+    src.playbackRate.value = this.playbackSpeed;
+    src.loop = this.loop;
     // Connect to BOTH paths; gains decide which is audible
     src.connect(this.inputGain);
     src.connect(this.dryBypass);
     src.onended = () => {
       if (this.source !== src) return; // superseded
+      if (this.loop) return; // ignore ended event if looping
       const reachedEnd = this.currentTime() >= (this.buffer?.duration ?? 0) - 0.05;
       if (reachedEnd) {
         this.playing = false;
@@ -253,7 +278,7 @@ export class AudioEngine {
     };
     src.start(0, Math.max(0, Math.min(startFrom, this.buffer.duration - 0.01)));
     this.source = src;
-    this.startedAt = this.ctx.currentTime - startFrom;
+    this.startedAt = this.ctx.currentTime - startFrom / this.playbackSpeed;
     this.playing = true;
     this.onPlayingChange?.(true);
     this.startRaf();
@@ -282,6 +307,27 @@ export class AudioEngine {
     this.pausedAt = Math.max(0, Math.min(t, this.duration()));
     if (wasPlaying) this.play(this.pausedAt);
     else this.onTimeUpdate?.(this.pausedAt);
+  }
+
+  setPlaybackSpeed(speed: number) {
+    this.playbackSpeed = speed;
+    if (this.playing && this.source && this.ctx) {
+      const currentT = this.currentTime();
+      this.startedAt = this.ctx.currentTime - currentT / speed;
+      this.source.playbackRate.setTargetAtTime(speed, this.ctx.currentTime, 0.01);
+    }
+  }
+
+  setLoop(l: boolean) {
+    this.loop = l;
+    if (this.source) {
+      this.source.loop = l;
+    }
+  }
+
+  jump(offset: number) {
+    const t = this.currentTime() + offset;
+    this.seek(t);
   }
 
   private stopSource() {

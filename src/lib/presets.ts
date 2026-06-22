@@ -1,5 +1,18 @@
 import type { EffectParams } from "./audio-engine";
-import { DEFAULT_PARAMS } from "./audio-engine";
+import { DEFAULT_PARAMS, PARAM_META } from "./audio-engine";
+
+// Coerce untrusted input (shared codes, corrupted storage) into a valid param set:
+// every known key forced to a finite number clamped to its meta range, unknown keys dropped.
+export function sanitizeParams(raw: unknown): EffectParams {
+  const src = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
+  const out = { ...DEFAULT_PARAMS };
+  (Object.keys(DEFAULT_PARAMS) as (keyof EffectParams)[]).forEach((k) => {
+    const n = Number(src[k]);
+    const meta = PARAM_META[k];
+    out[k] = Number.isFinite(n) ? Math.min(meta.max, Math.max(meta.min, n)) : DEFAULT_PARAMS[k];
+  });
+  return out;
+}
 
 export interface Preset {
   id: string;
@@ -76,6 +89,7 @@ export function decodePreset(code: string): { name: string; params: EffectParams
     const json = decodeURIComponent(escape(atob(b64)));
     const obj = JSON.parse(json);
     if (!obj?.p) return null;
-    return { name: obj.n ?? "Imported preset", params: { ...DEFAULT_PARAMS, ...obj.p } };
+    const name = typeof obj.n === "string" && obj.n.trim() ? obj.n.trim().slice(0, 80) : "Imported preset";
+    return { name, params: sanitizeParams(obj.p) };
   } catch { return null; }
 }

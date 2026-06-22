@@ -12,4 +12,8 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // Target a standalone Node server for non-Cloudflare hosts (Render, Railway, Fly, etc).
+  // Build output: .output/ — run with `node .output/server/index.mjs`, listens on $PORT.
+  // In the Lovable sandbox this is overridden back to cloudflare-module automatically.
+  nitro: { preset: "node-server" },
 });
