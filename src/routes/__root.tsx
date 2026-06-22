@@ -13,8 +13,13 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AppShell } from "@/components/AppShell";
 import { Toaster } from "@/components/ui/sonner";
+import { DiagnosticsDashboard } from "@/components/DiagnosticsDashboard";
+import { diagnostics } from "@/lib/diagnostics";
 
 function NotFoundComponent() {
+  useEffect(() => {
+    diagnostics.log("warning", "navigation", `Broken navigation: route not found (${typeof window !== "undefined" ? window.location.pathname : "?"})`);
+  }, []);
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
@@ -41,32 +46,76 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   const router = useRouter();
   useEffect(() => {
     reportLovableError(error, { boundary: "tanstack_root_error_component" });
+    // React render errors don't trigger window.onerror — log them here so the
+    // diagnostics dashboard captures unhandled exceptions surfaced by the boundary.
+    diagnostics.log("error", "exception", `Render boundary caught: ${error?.message || String(error)}`, error?.stack);
   }, [error]);
 
+  const handleRepair = () => {
+    try {
+      // Clear locks
+      localStorage.removeItem("voice-studio:active-recorder-lock");
+      // Validate project array and remove corrupted items
+      const raw = localStorage.getItem("voice-studio:projects");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const clean = parsed.filter(p => p && typeof p === "object" && typeof p.id === "string" && typeof p.name === "string");
+          localStorage.setItem("voice-studio:projects", JSON.stringify(clean));
+        }
+      }
+      alert("Application state repaired successfully. We will now reload the page.");
+      window.location.href = "/";
+    } catch (e) {
+      localStorage.removeItem("voice-studio:projects");
+      localStorage.removeItem("voice-studio:active-project-id");
+      alert("Corrupted database was reset. Workspace is clean.");
+      window.location.reload();
+    }
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="max-w-md text-center">
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">
-          This page didn't load
+    <div className="flex min-h-screen items-center justify-center bg-background px-4 py-8">
+      <div className="max-w-lg w-full rounded-2xl border border-destructive/20 bg-card/60 p-6 md:p-8 text-center backdrop-blur-md">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10 text-destructive mb-4">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+          </svg>
+        </div>
+        <h1 className="text-xl font-bold tracking-tight text-foreground">
+          Voice Studio Encountered a Crash
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Something went wrong on our end. You can try refreshing or head back home.
+          We apologize for the interruption. The system has automatically isolated the issue to prevent data loss.
         </p>
-        <div className="mt-6 flex flex-wrap justify-center gap-2">
+
+        {error && (
+          <div className="mt-4 rounded-lg bg-secondary/80 p-3 text-left font-mono text-xs text-destructive-foreground overflow-auto max-h-32 border border-border">
+            <span className="font-semibold">Error:</span> {error.message || String(error)}
+          </div>
+        )}
+
+        <div className="mt-6 flex flex-wrap justify-center gap-3">
           <button
             onClick={() => {
               router.invalidate();
               reset();
             }}
-            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            className="inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow hover:bg-primary/95 transition-colors cursor-pointer"
           >
-            Try again
+            Try Again
+          </button>
+          <button
+            onClick={handleRepair}
+            className="inline-flex items-center justify-center rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-accent transition-colors cursor-pointer"
+          >
+            Repair State & Diagnostics
           </button>
           <a
             href="/"
-            className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+            className="inline-flex items-center justify-center rounded-lg border border-input bg-secondary px-4 py-2 text-sm font-medium text-foreground hover:bg-secondary/85 transition-colors"
           >
-            Go home
+            Go Home
           </a>
         </div>
       </div>
@@ -123,6 +172,7 @@ function RootComponent() {
         <Outlet />
       </AppShell>
       <Toaster theme="dark" position="bottom-right" richColors />
+      <DiagnosticsDashboard />
     </QueryClientProvider>
   );
 }
