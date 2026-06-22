@@ -49,8 +49,7 @@ function Settings() {
         setDevices(list.filter((d) => d.kind === "audioinput"));
       } catch { /* ignore */ }
       try {
-        // @ts-expect-error - microphone permission
-        const status = await navigator.permissions?.query({ name: "microphone" });
+        const status = await (navigator as any).permissions?.query({ name: "microphone" as PermissionName });
         if (status) {
           setPermission(status.state as any);
           status.onchange = () => setPermission(status.state as any);
